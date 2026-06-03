@@ -1,20 +1,23 @@
 *&---------------------------------------------------------------------*
 *& Report z1pitd_material_migration
 *&---------------------------------------------------------------------*
-*&This Utility Program will fetch All of the Material Data from Source System
+*&This Utility Program will fetch the Material Data from Source System
 *&Post the data to the target system using the V2 Odata API_PRODUCT_SRV
 *&---------------------------------------------------------------------*
 REPORT z1pitd_material_migration.
 
 PARAMETERS:
-  p_matnr TYPE string,
-  p_werks TYPE string,
-  p_surl  TYPE string LOWER CASE,
-  p_suser TYPE string LOWER CASE,
-  p_spwd  TYPE string LOWER CASE,
-  p_durl  TYPE string LOWER CASE,
-  p_duser TYPE string LOWER CASE,
-  p_dpwd  TYPE string LOWER CASE.
+  p_matnr  TYPE string OBLIGATORY,
+  p_newmat TYPE string,
+  p_srmat  TYPE string,
+  p_trmat  TYPE string,
+  p_werks  TYPE string OBLIGATORY,
+  p_surl   TYPE string LOWER CASE OBLIGATORY,
+  p_suser  TYPE string LOWER CASE,
+  p_spwd   TYPE string LOWER CASE,
+  p_durl   TYPE string LOWER CASE OBLIGATORY.
+*  p_duser TYPE string LOWER CASE,
+*  p_dpwd  TYPE string LOWER CASE.
 
 "=====================================================================
 " Entity Configuration Type
@@ -110,9 +113,9 @@ CLASS lcl_main DEFINITION.
         IMPORTING iv_surl  TYPE string
                   iv_suser TYPE string
                   iv_spwd  TYPE string
-                  iv_durl  TYPE string
-                  iv_duser TYPE string
-                  iv_dpwd  TYPE string,
+                  iv_durl  TYPE string,
+*                  iv_duser TYPE string
+*                  iv_dpwd  TYPE string,
       parse_respone
         IMPORTING iv_responsexml TYPE string
                   iv_method      TYPE string
@@ -141,14 +144,29 @@ CLASS lcl_main IMPLEMENTATION.
     mv_suser = iv_suser.
     mv_spwd  = iv_spwd.
     mv_durl  = iv_durl.
-    mv_duser = iv_duser.
-    mv_dpwd  = iv_dpwd.
+*    mv_duser = iv_duser.
+*    mv_dpwd  = iv_dpwd.
 
     DATA: lo_config_mgr TYPE REF TO lcl_config_manager,
           lt_configs    TYPE tt_entity_config,
           ls_config     TYPE ts_entity_config,
-          ls_out        TYPE ty_out.
-
+          ls_out        TYPE ty_out,
+          lv_matnr      TYPE matnr.
+    lv_matnr = p_matnr.
+*check if material exists
+    SELECT SINGLE matnr
+         FROM mara
+      WHERE matnr = @lv_matnr
+      INTO @lv_matnr.
+    IF sy-subrc = 0.
+      ls_out-werks = p_werks.
+      ls_out-matnr = p_matnr.
+      ls_out-entity_set = |Check Material Existence in Target System|.
+      ls_out-severity = 'E'.
+      ls_out-get_msg = |Source Material Exists in Target System|.
+      APPEND ls_out TO mv_out.
+      RETURN.
+    ENDIF.
     CREATE OBJECT lo_config_mgr
       EXPORTING
         ps_matnr = p_matnr
@@ -180,6 +198,17 @@ CLASS lcl_main IMPLEMENTATION.
         EXIT.
       ENDIF.
       TRY.
+*replace the material number
+          IF p_newmat IS NOT INITIAL.
+            REPLACE ALL OCCURRENCES OF p_matnr IN lv_json WITH p_newmat.
+            REPLACE ALL OCCURRENCES OF REGEX '"ProductOldID"\s*:\s*"[^"]*"'
+                   IN lv_json
+                   WITH |"ProductOldID":"{ p_matnr }"|.
+          ENDIF.
+          IF p_srmat IS NOT INITIAL.
+            REPLACE ALL OCCURRENCES OF p_srmat IN lv_json WITH p_trmat.
+          ENDIF.
+
           CALL METHOD post
             EXPORTING
               iv_entity_set = ls_config-entity_set
@@ -252,11 +281,37 @@ CLASS lcl_main IMPLEMENTATION.
           lv_http_status   TYPE string,
           lv_json_response TYPE string.
 
-    cl_http_client=>create_by_url(
-      EXPORTING url = mv_durl
-      IMPORTING client = lo_http_client ).
-
-    lo_http_client->authenticate( username = mv_duser password = mv_dpwd ).
+*    cl_http_client=>create_by_url(
+*      EXPORTING url = mv_durl
+*      IMPORTING client = lo_http_client ).
+    cl_http_client=>create_by_destination(
+      EXPORTING
+        destination                = 'NONE'
+      IMPORTING
+        client                     = lo_http_client
+      EXCEPTIONS
+        argument_not_found         = 1
+        destination_not_found      = 2
+        destination_no_authority   = 3
+        plugin_not_active          = 4
+        internal_error             = 5
+        oa2c_set_token_error       = 6
+        oa2c_missing_authorization = 7
+        oa2c_invalid_config        = 8
+        oa2c_invalid_parameters    = 9
+        oa2c_invalid_scope         = 10
+        oa2c_invalid_grant         = 11
+        oa2c_secstore_adm          = 12
+        OTHERS                     = 13
+    ).
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+        WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+    cl_http_utility=>set_request_uri( request = lo_http_client->request
+                                  uri     = mv_durl ).
+    lo_http_client->propertytype_logon_popup = lo_http_client->co_disabled.
+*    lo_http_client->authenticate( username = mv_duser password = mv_dpwd ).
     lo_http_client->propertytype_accept_cookie = if_http_client=>co_enabled.
 
     lo_rest_client = NEW cl_rest_http_client( io_http_client = lo_http_client ).
@@ -277,9 +332,9 @@ CLASS lcl_main IMPLEMENTATION.
             CHANGING  cs_out          = cs_out ).
         RETURN.
       WHEN OTHERS.
-        cs_out-post_msg = |Unexpected Error: x-csrf_token fetch-{ lv_http_status }|.
-        cs_out-severity = 'E'.
-        RETURN.
+*        cs_out-post_msg = |Unexpected Error: x-csrf_token fetch-{ lv_http_status }|.
+*        cs_out-severity = 'E'.
+*        RETURN.
     ENDCASE.
 
     " Prepare POST
@@ -370,6 +425,15 @@ CLASS lcl_main IMPLEMENTATION.
             cs_out-severity = 'E'.
           ENDIF.
       ENDTRY.
+      RETURN.
+    ELSE.
+      IF iv_method = 'GET'.
+        cs_out-get_msg = iv_responsexml.
+        cs_out-severity = 'E'.
+      ELSE.
+        cs_out-post_msg = iv_responsexml.
+        cs_out-severity = 'E'.
+      ENDIF.
       RETURN.
     ENDIF.
 *Backup Code for XML Parsing
@@ -508,9 +572,9 @@ START-OF-SELECTION.
     iv_surl  = p_surl
     iv_suser = p_suser
     iv_spwd  = p_spwd
-    iv_durl  = p_durl
-    iv_duser = p_duser
-    iv_dpwd  = p_dpwd ).
+    iv_durl  = p_durl ).
+*    iv_duser = p_duser
+*    iv_dpwd  = p_dpwd ).
 
   TRY.
       CALL METHOD cl_salv_table=>factory
@@ -520,12 +584,12 @@ START-OF-SELECTION.
           t_table      = lo_main->mv_out.
       DATA(lo_display) = lo_alv->get_columns( ).
       lo_display->set_optimize( abap_true ).
-      lo_display->get_column( 'GET_MSG' )->set_short_text( 'GETMethod' ).
-      lo_display->get_column( 'GET_MSG' )->set_long_text( 'GETMethod' ).
-      lo_display->get_column( 'GET_MSG' )->set_medium_text( 'GETMethod' ).
-      lo_display->get_column( 'POST_MSG' )->set_short_text( 'POSTMethod' ).
-      lo_display->get_column( 'POST_MSG' )->set_long_text( 'POSTMethod' ).
-      lo_display->get_column( 'POST_MSG' )->set_medium_text( 'POSTMethod' ).
+      lo_display->get_column( 'GET_MSG' )->set_short_text( 'SR1GET' ).
+      lo_display->get_column( 'GET_MSG' )->set_long_text( 'SR1GET' ).
+      lo_display->get_column( 'GET_MSG' )->set_medium_text( 'SR1GET' ).
+      lo_display->get_column( 'POST_MSG' )->set_short_text( 'SD1POST' ).
+      lo_display->get_column( 'POST_MSG' )->set_long_text( 'SD1POST' ).
+      lo_display->get_column( 'POST_MSG' )->set_medium_text( 'SD1POST' ).
       lo_display->get_column( 'SEVERITY' )->set_short_text( 'Type' ).
       lo_display->get_column( 'SEVERITY' )->set_long_text( 'Type' ).
       lo_display->get_column( 'SEVERITY' )->set_medium_text( 'Type' ).
